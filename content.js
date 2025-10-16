@@ -149,6 +149,9 @@ async function fillCurrentCompose() {
     console.log(`🔥 FILLING ROW ${window.currentRowIndex + 1}/${window.emailData.length}: ${currentEmail.email}`);
     
     try {
+        // Fill recipients first
+        await fillRecipients(currentEmail.email);
+
         // Fill subject
         fillSubject(currentEmail.subject);
         
@@ -168,6 +171,142 @@ async function fillCurrentCompose() {
         console.error('❌ FILL ERROR:', error);
         showNotification(`Error filling draft: ${error.message}`);
     }
+}
+
+async function fillRecipients(email) {
+    if (!email) {
+        throw new Error('No email address provided');
+    }
+
+    console.log(`🔥 FILLING EMAIL FIELD: "${email}"`);
+
+    const composeWindow = getActiveComposeWindow();
+    if (!composeWindow) {
+        throw new Error('Compose window not found');
+    }
+
+    const recipientSelectors = [
+        'textarea[name="to"]',
+        'input[name="to"]',
+        'textarea[aria-label="To"]',
+        'input[aria-label="To"]',
+        'div[aria-label="To"]',
+        'div[aria-label^="To "]',
+        'div[aria-label*="Add recipients"]',
+        'div[role="combobox"][aria-label*="Recipients"]',
+        '.oj div[role="textbox"]',
+        '.oj div[contenteditable="true"]'
+    ];
+
+    let recipientField = null;
+    for (const selector of recipientSelectors) {
+        recipientField = composeWindow.querySelector(selector);
+        if (recipientField) {
+            console.log(`🔥 FOUND EMAIL FIELD: ${selector}`);
+            break;
+        }
+    }
+
+    if (!recipientField) {
+        throw new Error('Email field not found');
+    }
+
+    let editableElement = recipientField;
+
+    if (recipientField.tagName === 'DIV') {
+        const nestedEditable = recipientField.querySelector('textarea, input, div[contenteditable="true"]');
+        if (nestedEditable) {
+            editableElement = nestedEditable;
+        }
+    }
+
+    console.log('🔥 EMAIL FIELD TYPE:', editableElement.tagName, editableElement.getAttribute('contenteditable'));
+
+    // Clear existing recipient chips if any
+    const chips = composeWindow.querySelectorAll('div[role="listitem"][data-hovercard-id]');
+    chips.forEach(chip => {
+        const removeButton = chip.querySelector('[aria-label*="Remove"], [aria-label*="Delete"], [tabindex][role="button"]');
+        if (removeButton) {
+            removeButton.click();
+        } else {
+            chip.remove();
+        }
+    });
+
+    editableElement.focus();
+
+    if ('value' in editableElement) {
+        editableElement.value = '';
+        editableElement.dispatchEvent(new Event('input', { bubbles: true }));
+        editableElement.value = email;
+        editableElement.dispatchEvent(new Event('input', { bubbles: true }));
+        editableElement.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (editableElement.getAttribute && editableElement.getAttribute('contenteditable') === 'true') {
+        editableElement.innerHTML = '';
+        editableElement.textContent = '';
+        editableElement.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'deleteContentBackward' }));
+        editableElement.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: email }));
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, email);
+    } else {
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, email);
+    }
+
+    // As a final fallback, type via keyboard events if the field is still empty
+    await sleep(50);
+    const currentValue = editableElement.value || editableElement.textContent || '';
+    if (!currentValue.trim()) {
+        console.log('⚠️ Email field still empty, typing via keyboard events');
+        await typeWithKeyboard(editableElement, email);
+    }
+
+    await sleep(50);
+
+    // Simulate Enter to convert to Gmail chips
+    const enterDown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true });
+    const enterUp = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true });
+    editableElement.dispatchEvent(enterDown);
+    editableElement.dispatchEvent(enterUp);
+
+    editableElement.dispatchEvent(new Event('blur', { bubbles: true }));
+
+    await sleep(150);
+
+    const addedChips = composeWindow.querySelectorAll(`div[role="listitem"][data-hovercard-id*="${email}"]`);
+    if (!addedChips || addedChips.length === 0) {
+        console.warn('⚠️ Email chip not detected after insertion');
+    }
+
+    console.log('✅ EMAIL FIELD FILLED');
+}
+
+async function typeWithKeyboard(element, text) {
+    element.focus();
+    const chars = text.split('');
+    for (const char of chars) {
+        const keyDown = new KeyboardEvent('keydown', { key: char, bubbles: true });
+        const keyPress = new KeyboardEvent('keypress', { key: char, bubbles: true });
+        const keyUp = new KeyboardEvent('keyup', { key: char, bubbles: true });
+        element.dispatchEvent(keyDown);
+        element.dispatchEvent(keyPress);
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
+        element.dispatchEvent(keyUp);
+        await sleep(10);
+    }
+}
+
+function getActiveComposeWindow() {
+    const composeDialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    for (const dialog of composeDialogs) {
+        if (dialog.offsetParent === null) {
+            continue; // hidden
+        }
+        if (dialog.querySelector('textarea[name="to"], div[aria-label="To"], input[name="to"]')) {
+            return dialog;
+        }
+    }
+    return null;
 }
 
 function fillSubject(subject) {

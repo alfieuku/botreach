@@ -325,33 +325,27 @@ async function fillNextDraft() {
 async function ensureContentScriptInjected(tabId, force = false) {
     return new Promise(async (resolve, reject) => {
         try {
-            if (!force) {
-                // Lightweight ping to see if content script is alive
-                const verify = (attempt = 0) => {
-                    chrome.tabs.sendMessage(tabId, { action: 'ping' }, { frameId: 0 }, () => {
-                        if (chrome.runtime.lastError) {
-                            if (attempt < 3) {
-                                // Try injecting and re‑verifying
-                                inject().then(() => setTimeout(() => verify(attempt + 1), 300));
-                            } else {
-                                reject(new Error('Content script not reachable after multiple attempts'));
-                            }
-                        } else {
-                            resolve();
-                        }
-                    });
-                };
-                verify(0);
-            } else {
-                inject().then(() => setTimeout(resolve, 300)).catch(() => resolve());
-            }
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                files: ['content.js']
+            });
 
-            function inject() {
-                return chrome.scripting.executeScript({
-                    target: { tabId },
-                    files: ['content.js']
+            const verify = (attempt = 0) => {
+                chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+                    if (chrome.runtime.lastError || !response) {
+                        if (attempt < 3) {
+                            setTimeout(() => verify(attempt + 1), 300);
+                        } else {
+                            const message = chrome.runtime.lastError?.message || 'Content script did not respond';
+                            reject(new Error(`Content script not reachable after multiple attempts: ${message}`));
+                        }
+                    } else {
+                        resolve();
+                    }
                 });
-            }
+            };
+
+            verify(0);
         } catch (e) {
             reject(e);
         }
