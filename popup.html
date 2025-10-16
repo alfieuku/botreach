@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gmail Draft Creator</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Gmail Draft Creator</h1>
+            <p>Upload a CSV file to create draft emails</p>
+        </div>
+        
+        <div class="upload-section">
+            <div class="file-input-container">
+                <input type="file" id="csvFile" accept=".csv" />
+                <label for="csvFile" class="file-input-label">
+                    <span class="file-input-text">Choose CSV File</span>
+                    <span class="file-input-icon">📁</span>
+                </label>
+            </div>
+            
+            <div class="file-info" id="fileInfo" style="display: none;">
+                <p id="fileName"></p>
+                <p id="fileSize"></p>
+            </div>
+        </div>
+        
+        <div class="preview-section" id="previewSection" style="display: none;">
+            <h3>CSV Preview</h3>
+            <div class="table-container">
+                <table id="previewTable">
+                    <thead id="previewHeader"></thead>
+                    <tbody id="previewBody"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="email-template-section">
+            <h3>Email Template</h3>
+            <div class="template-input">
+                <label for="subjectTemplate">Subject Template:</label>
+                <input type="text" id="subjectTemplate" placeholder="e.g., Hello [name], regarding [company]" />
+            </div>
+            <div class="template-input">
+                <label for="bodyTemplate">Email Body Template:</label>
+                <textarea id="bodyTemplate" rows="6" placeholder="Dear [name],\n\nI hope this email finds you well. I'm reaching out regarding [company]..."></textarea>
+            </div>
+            <div class="template-help">
+                <p><strong>Available variables:</strong> [name], [email], [company]</p>
+            </div>
+        </div>
+        
+        <div class="action-section">
+            <button id="createDrafts" class="primary-button" disabled>
+                Create Drafts
+            </button>
+            <div class="status" id="status"></div>
+        </div>
+        
+        <div class="instructions">
+            <h4>Instructions:</h4>
+            <ol>
+                <li>Make sure you're on Gmail (mail.google.com)</li>
+                <li>Upload a CSV file with columns: name, email, company</li>
+                <li>Customize your email template using variables</li>
+                <li>Click "Create Drafts" to generate draft emails</li>
+            </ol>
+        </div>
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
