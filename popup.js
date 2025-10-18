@@ -13,6 +13,8 @@ const previewHeader = document.getElementById('previewHeader');
 const previewBody = document.getElementById('previewBody');
 const subjectTemplate = document.getElementById('subjectTemplate');
 const bodyTemplate = document.getElementById('bodyTemplate');
+const openaiKeyInput = document.getElementById('openaiKey');
+const personalizationPromptInput = document.getElementById('personalizationPrompt');
 const createDraftsButton = document.getElementById('createDrafts');
 const status = document.getElementById('status');
 
@@ -72,7 +74,7 @@ async function checkOngoingSession() {
                 bodyTemplate.value = result.templates.body || '';
                 console.log('Restored templates');
             }
-            
+
             showStatus(`Continuing draft session: ${currentRow}/${totalRows} (${remaining} remaining)`, 'info');
             createDraftsButton.textContent = 'Fill Next Draft';
             createDraftsButton.onclick = fillNextDraft;
@@ -91,6 +93,8 @@ createDraftsButton.addEventListener('click', createDrafts);
 // Template change handlers
 subjectTemplate.addEventListener('input', saveTemplates);
 bodyTemplate.addEventListener('input', saveTemplates);
+openaiKeyInput.addEventListener('input', saveOpenAISettings);
+personalizationPromptInput.addEventListener('input', saveOpenAISettings);
 
 async function handleFileSelect(event) {
     const file = event.target.files[0];
@@ -263,20 +267,56 @@ async function createDrafts() {
     
     const subject = subjectTemplate.value.trim();
     const body = bodyTemplate.value.trim();
-    
+    const openaiKey = openaiKeyInput.value.trim();
+    const personalizationPrompt = personalizationPromptInput.value.trim();
+    const needsPersonalization = subject.includes('[insert specific info]') || body.includes('[insert specific info]');
+
     if (!subject || !body) {
         showStatus('Please fill in both subject and body templates', 'error');
         return;
     }
-    
+
+    if (needsPersonalization) {
+        if (!openaiKey) {
+            showStatus('Please add your OpenAI API key to use the [personalized] placeholder.', 'error');
+            return;
+        }
+        if (!personalizationPrompt) {
+            showStatus('Please provide a personalization prompt to use the [personalized] placeholder.', 'error');
+            return;
+        }
+    }
+
+    chrome.storage.local.set({
+        openaiKey: openaiKey,
+        personalizationPrompt: personalizationPrompt
+    });
+
     // Prepare data for content script
     const emailData = csvData.map(row => ({
         name: row.name || '',
         email: row.email || '',
         company: row.company || '',
-        subject: replaceTemplateVariables(subject, row),
-        body: replaceTemplateVariables(body, row)
+        personalized: ''
     }));
+
+    if (needsPersonalization) {
+        try {
+            showStatus('Generating personalized paragraphs...', 'info');
+            await personalizeEmails(emailData, personalizationPrompt, openaiKey, subjectTemplate.value, bodyTemplate.value);
+            showStatus('Personalization complete. Creating drafts...', 'info');
+        } catch (error) {
+            console.error('Personalization failed:', error);
+            showStatus('Personalization failed: ' + error.message, 'error');
+            return;
+        }
+    }
+
+    emailData.forEach(email => {
+        email.subject = replaceTemplateVariables(subject, email);
+        email.body = replaceTemplateVariables(body, email);
+        delete email.personalized;
+    });
     
     try {
         // Ensure content script is injected
@@ -290,6 +330,10 @@ async function createDrafts() {
             templates: {
                 subject: subjectTemplate.value,
                 body: bodyTemplate.value
+            },
+            openaiSettings: {
+                key: openaiKey,
+                prompt: personalizationPrompt
             }
         }, 10000);
 
@@ -369,11 +413,127 @@ function sendMessageWithTimeout(tabId, message, timeout = 10000) {
     });
 }
 
-function replaceTemplateVariables(template, data) {
+function replaceBaseVariables(template, data) {
+    if (!template) return '';
     return template
         .replace(/\[name\]/g, data.name || '')
         .replace(/\[email\]/g, data.email || '')
         .replace(/\[company\]/g, data.company || '');
+}
+
+function replaceTemplateVariables(template, data) {
+    const withBaseVariables = replaceBaseVariables(template, data);
+    return withBaseVariables.replace(/\[insert specific info\]/g, data.personalized || '');
+}
+
+async function personalizeEmails(emailData, promptTemplate, apiKey, subjectTemplateText, bodyTemplateText) {
+    for (let index = 0; index < emailData.length; index++) {
+        const email = emailData[index];
+        const prompt = buildPrompt(promptTemplate, email, subjectTemplateText, bodyTemplateText).trim();
+
+        if (!prompt) {
+            email.personalized = '';
+            continue;
+        }
+
+        try {
+            const personalization = await requestPersonalizedParagraph(prompt, apiKey);
+            email.personalized = personalization;
+        } catch (error) {
+            const identifier = email.company || email.name || `row ${index + 1}`;
+            throw new Error(`Failed to personalize for ${identifier}: ${error.message}`);
+        }
+    }
+}
+
+function buildPrompt(promptTemplate, email, subjectTemplateText, bodyTemplateText) {
+    const basePrompt = replaceBaseVariables(promptTemplate, email);
+    const subjectContext = replaceBaseVariables(subjectTemplateText, email);
+    const bodyContextBefore = getContextBeforeInsert(bodyTemplateText, email, true);
+    const bodyContextAfter = getContextAfterInsert(bodyTemplateText, email, true);
+
+    let contextualPrompt = `${basePrompt.trim()}`;
+
+    if (subjectTemplateText && subjectTemplateText.includes('[insert specific info]')) {
+        contextualPrompt += `\n\nThe email subject template is: "${subjectTemplateText}".`;
+    } else if (subjectContext) {
+        contextualPrompt += `\n\nThe resolved subject line is: "${subjectContext}".`;
+    }
+
+    if (bodyContextBefore || bodyContextAfter) {
+        contextualPrompt += '\n\nThe email body will contain: ';
+        contextualPrompt += bodyContextBefore ? `Before the insert: "${bodyContextBefore}". ` : '';
+        contextualPrompt += bodyContextAfter ? `After the insert: "${bodyContextAfter}".` : '';
+    }
+
+    contextualPrompt += '\n\nReturn exactly the 2-3 sentence snippet that should replace [insert specific info].';
+
+    return contextualPrompt;
+}
+
+function getContextBeforeInsert(bodyTemplateText, email, resolveVariables) {
+    const [before] = bodyTemplateText.split('[insert specific info]');
+    if (!before) return '';
+    return resolveVariables ? replaceBaseVariables(before, email) : before;
+}
+
+function getContextAfterInsert(bodyTemplateText, email, resolveVariables) {
+    const parts = bodyTemplateText.split('[insert specific info]');
+    if (parts.length < 2) return '';
+    const after = parts.slice(1).join('[insert specific info]');
+    return resolveVariables ? replaceBaseVariables(after, email) : after;
+}
+
+async function requestPersonalizedParagraph(prompt, apiKey) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            signal: controller.signal,
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You craft concise, friendly email outreach paragraphs. Keep it to 2-3 sentences tailored to the provided details.'
+                    },
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ],
+                temperature: 0.7,
+                max_tokens: 200
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            const message = data?.error?.message || response.statusText || 'Unknown error';
+            throw new Error(message);
+        }
+
+        const content = data?.choices?.[0]?.message?.content?.trim();
+        if (!content) {
+            throw new Error('Received empty response from OpenAI.');
+        }
+
+        return content;
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            throw new Error('Request to OpenAI timed out.');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 function showStatus(message, type = 'info') {
@@ -397,13 +557,29 @@ function saveTemplates() {
     chrome.storage.local.set({ templates });
 }
 
+function saveOpenAISettings() {
+    const settings = {
+        openaiKey: openaiKeyInput.value,
+        personalizationPrompt: personalizationPromptInput.value
+    };
+    chrome.storage.local.set(settings);
+}
+
 async function loadSavedData() {
     try {
-        const result = await chrome.storage.local.get(['templates']);
+        const result = await chrome.storage.local.get(['templates', 'openaiKey', 'personalizationPrompt']);
         if (result.templates) {
             subjectTemplate.value = result.templates.subject || subjectTemplate.value;
             bodyTemplate.value = result.templates.body || bodyTemplate.value;
             console.log('Restored templates from storage');
+        }
+
+        if (result.openaiKey) {
+            openaiKeyInput.value = result.openaiKey;
+        }
+
+        if (result.personalizationPrompt) {
+            personalizationPromptInput.value = result.personalizationPrompt;
         }
     } catch (error) {
         console.error('Failed to load saved templates:', error);

@@ -189,6 +189,17 @@ tr:hover {
     margin: 0;
 }
 
+.ai-settings-section {
+    padding: 20px;
+    border-bottom: 1px solid #eee;
+}
+
+.ai-settings-section h3 {
+    margin-bottom: 15px;
+    color: #333;
+    font-size: 16px;
+}
+
 .action-section {
     padding: 20px;
     text-align: center;

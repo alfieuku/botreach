@@ -49,7 +49,23 @@
                 <textarea id="bodyTemplate" rows="6" placeholder="Dear [name],\n\nI hope this email finds you well. I'm reaching out regarding [company]..."></textarea>
             </div>
             <div class="template-help">
-                <p><strong>Available variables:</strong> [name], [email], [company]</p>
+                <p><strong>Available variables:</strong> [name], [email], [company], [insert specific info]</p>
+            </div>
+        </div>
+
+        <div class="ai-settings-section">
+            <h3>AI Personalization</h3>
+            <div class="template-input">
+                <label for="openaiKey">OpenAI API Key:</label>
+                <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off" />
+            </div>
+            <div class="template-input">
+                <label for="personalizationPrompt">Personalization Prompt:</label>
+                <textarea id="personalizationPrompt" rows="4" placeholder="Write 2-3 sentences tailored to [company] highlighting recent initiatives..."></textarea>
+            </div>
+            <div class="template-help">
+                <p>Use the variables in your prompt, e.g. "Write 2 sentences explaining why [company]'s mission aligns with our solution."</p>
+                <p>Your API key stays on this device and is only used when the template contains [insert specific info].</p>
             </div>
         </div>
         
