@@ -22,20 +22,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     if (request.action === 'createDrafts') {
         // Store the data and reset index
-        saveDataToStorage(request.data, 0, request.csvData, request.templates);
+        saveDataToStorage(request.data, 0, request.csvData, request.templates, request.openaiSettings);
         console.log(`🔥 SIMPLE FILL: Ready to fill ${request.data.length} drafts`);
-        
-        // Fill the first row immediately
-        fillCurrentCompose();
         
         sendResponse({ success: true, message: `Ready to fill ${request.data.length} drafts. Click the button for each draft.` });
         return;
     }
     
     if (request.action === 'fillNext') {
-        fillCurrentCompose();
-        sendResponse({ success: true, message: 'Filled current compose window' });
-        return;
+        fillCurrentCompose()
+            .then((result) => {
+                if (result?.completed) {
+                    sendResponse({ success: true, message: 'All drafts completed', completed: true });
+                } else {
+                    sendResponse({ success: true, message: 'Filled current compose window', completed: false });
+                }
+            })
+            .catch((error) => {
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
     }
     
     if (request.action === 'getStatus') {
@@ -59,18 +65,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function loadSavedData() {
     try {
-        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates']);
+        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates', 'openaiSettings', 'personalizedCache']);
         if (result.emailData && result.currentRowIndex !== undefined) {
             window.emailData = result.emailData;
             window.currentRowIndex = result.currentRowIndex;
             console.log(`🔥 RESTORED: Row ${currentRowIndex + 1}/${emailData.length} from storage`);
         }
         
+        window.openaiSettings = result.openaiSettings || null;
+        window.personalizedCache = result.personalizedCache || {};
+
         // Return CSV data and templates for popup to use
         return {
             csvData: result.csvData || null,
             templates: result.templates || null,
-            hasSession: result.emailData && result.currentRowIndex !== undefined
+            hasSession: result.emailData && result.currentRowIndex !== undefined,
+            openaiSettings: window.openaiSettings || null
         };
     } catch (error) {
         console.log('No saved data found');
@@ -78,7 +88,7 @@ async function loadSavedData() {
     }
 }
 
-async function saveDataToStorage(emailData, index, csvData = null, templates = null) {
+async function saveDataToStorage(emailData, index, csvData = null, templates = null, openaiSettings = null) {
     try {
         const dataToSave = {
             emailData: emailData,
@@ -94,15 +104,22 @@ async function saveDataToStorage(emailData, index, csvData = null, templates = n
             dataToSave.templates = templates;
             console.log(`🔥 SAVING TEMPLATES: Subject and body`);
         }
+        if (openaiSettings) {
+            dataToSave.openaiSettings = openaiSettings;
+            console.log('🔥 SAVING OPENAI SETTINGS: Stored key & prompt metadata');
+        }
         
         await chrome.storage.local.set(dataToSave);
         window.emailData = emailData;
         window.currentRowIndex = index;
+        if (openaiSettings) {
+            window.openaiSettings = openaiSettings;
+        }
         console.log(`🔥 SAVED: ${emailData.length} drafts, starting at row ${index + 1}`);
         
         // Verify what was actually saved
-        const verification = await chrome.storage.local.get(['csvData', 'templates']);
-        console.log(`🔥 VERIFICATION: CSV rows saved: ${verification.csvData?.length || 0}, Templates saved: ${verification.templates ? 'Yes' : 'No'}`);
+        const verification = await chrome.storage.local.get(['csvData', 'templates', 'openaiSettings']);
+        console.log(`🔥 VERIFICATION: CSV rows saved: ${verification.csvData?.length || 0}, Templates saved: ${verification.templates ? 'Yes' : 'No'}, OpenAI settings saved: ${verification.openaiSettings ? 'Yes' : 'No'}`);
         
     } catch (error) {
         console.error('Failed to save data:', error);
@@ -123,6 +140,12 @@ async function updateCurrentIndex(index) {
     }
 }
 
+async function completeDraftSession() {
+    await chrome.storage.local.remove(['emailData', 'currentRowIndex']);
+    window.emailData = null;
+    window.currentRowIndex = undefined;
+}
+
 function getCurrentStatus() {
     if (!window.emailData || window.currentRowIndex === undefined) {
         return { hasData: false };
@@ -140,15 +163,16 @@ async function fillCurrentCompose() {
     if (!window.emailData || window.currentRowIndex >= window.emailData.length) {
         console.log('✅ ALL DRAFTS COMPLETE: No more rows to fill');
         showNotification('All drafts completed! 🎉');
-        // Clear only session progress, keep CSV and templates
-        await chrome.storage.local.remove(['emailData', 'currentRowIndex']);
-        return;
+        await completeDraftSession();
+        return { completed: true };
     }
     
     const currentEmail = window.emailData[window.currentRowIndex];
     console.log(`🔥 FILLING ROW ${window.currentRowIndex + 1}/${window.emailData.length}: ${currentEmail.email}`);
     
     try {
+        await ensurePersonalization(currentEmail);
+
         // Fill recipients first
         await fillRecipients(currentEmail.email);
 
@@ -167,10 +191,249 @@ async function fillCurrentCompose() {
         
         console.log(`✅ FILLED: Row ${newIndex}/${window.emailData.length}`);
         
+        return { completed: false, remaining, filledIndex: emailData.rowIndex ?? window.currentRowIndex - 1 };
     } catch (error) {
         console.error('❌ FILL ERROR:', error);
         showNotification(`Error filling draft: ${error.message}`);
+        const shouldContinue = handleFillError(error, window.currentRowIndex);
+        if (shouldContinue) {
+            const newIndex = window.currentRowIndex + 1;
+            await updateCurrentIndex(newIndex);
+            if (newIndex >= window.emailData.length) {
+                await completeDraftSession();
+                return { completed: true };
+            }
+            showNotification(`Skipped row ${newIndex}. Continuing to next recipient.`);
+            return fillCurrentCompose();
+        }
+        throw error;
     }
+}
+
+function handleFillError(error, index) {
+    const message = (error?.message || '').toLowerCase();
+    if (message.includes('no email address') || message.includes('email field not found')) {
+        console.warn(`Skipping row ${index + 1} due to missing email.`);
+        return true;
+    }
+    if (message.includes('compose window not found')) {
+        console.warn(`Compose window not ready for row ${index + 1}.`);
+        return false;
+    }
+    return false;
+}
+
+async function ensurePersonalization(emailData) {
+    const settings = window.openaiSettings || {};
+    const subjectTemplate = settings.subjectTemplate || '';
+    const bodyTemplate = settings.bodyTemplate || '';
+
+    if (!subjectTemplate || !bodyTemplate) {
+        throw new Error('Email templates not available.');
+    }
+
+    if (!window.personalizedCache) {
+        window.personalizedCache = {};
+    }
+
+    const cacheKey = (
+        emailData.email ||
+        emailData.company ||
+        emailData.name ||
+        (typeof emailData.rowIndex === 'number' ? `row_${emailData.rowIndex}` : `row_${window.currentRowIndex}`)
+    ).toLowerCase();
+    let personalizedSnippet = window.personalizedCache[cacheKey] || '';
+
+    if (settings.needsPersonalization) {
+        if (!settings.key) {
+            throw new Error('OpenAI API key missing.');
+        }
+        if (!settings.prompt) {
+            throw new Error('Personalization prompt missing.');
+        }
+
+        if (!personalizedSnippet) {
+            personalizedSnippet = await personalizeSingleEmail(emailData, settings);
+            window.personalizedCache[cacheKey] = personalizedSnippet;
+            await chrome.storage.local.set({ personalizedCache: window.personalizedCache });
+        }
+    }
+
+    applyTemplatesToEmail(emailData, subjectTemplate, bodyTemplate, personalizedSnippet);
+    await chrome.storage.local.set({ emailData: window.emailData });
+}
+
+function applyTemplatesToEmail(emailData, subjectTemplate, bodyTemplate, personalizedSnippet) {
+    const templateData = {
+        name: emailData.name || '',
+        email: emailData.email || '',
+        company: emailData.company || '',
+        personalized: personalizedSnippet || ''
+    };
+
+    emailData.personalized = templateData.personalized;
+    emailData.subject = replaceTemplateVariables(subjectTemplate, templateData);
+    emailData.body = replaceTemplateVariables(bodyTemplate, templateData);
+}
+
+async function personalizeSingleEmail(emailData, settings) {
+    const prompt = buildPrompt(
+        settings.prompt,
+        emailData,
+        settings.subjectTemplate,
+        settings.bodyTemplate
+    ).trim();
+
+    if (!prompt) {
+        return '';
+    }
+
+    return requestPersonalizedParagraph(prompt, settings.key);
+}
+
+function buildPrompt(promptTemplate, emailData, subjectTemplateText, bodyTemplateText) {
+    const baseData = {
+        name: emailData.name || '',
+        email: emailData.email || '',
+        company: emailData.company || ''
+    };
+
+    const basePrompt = replaceBaseVariables(promptTemplate, baseData).trim();
+    let contextualPrompt = basePrompt;
+
+    if (subjectTemplateText) {
+        if (subjectTemplateText.includes('[insert specific info]')) {
+            contextualPrompt += `\n\nThe email subject template is: "${subjectTemplateText}".`;
+        } else {
+            const resolvedSubject = replaceBaseVariables(subjectTemplateText, baseData);
+            if (resolvedSubject) {
+                contextualPrompt += `\n\nThe resolved subject line is: "${resolvedSubject}".`;
+            }
+        }
+    }
+
+    const bodyContextBefore = getContextBeforeInsert(bodyTemplateText, baseData);
+    const bodyContextAfter = getContextAfterInsert(bodyTemplateText, baseData);
+
+    if (bodyContextBefore || bodyContextAfter) {
+        contextualPrompt += '\n\nThe email body will contain: ';
+        contextualPrompt += bodyContextBefore ? `Before the insert: "${bodyContextBefore}". ` : '';
+        contextualPrompt += bodyContextAfter ? `After the insert: "${bodyContextAfter}".` : '';
+    }
+
+    contextualPrompt += '\n\nReturn exactly one sentence that should replace [insert specific info].';
+
+    return contextualPrompt;
+}
+
+function replaceBaseVariables(template, data) {
+    if (!template) {
+        return '';
+    }
+
+    return template
+        .replace(/\[name\]/g, data.name || '')
+        .replace(/\[email\]/g, data.email || '')
+        .replace(/\[company\]/g, data.company || '');
+}
+
+function replaceTemplateVariables(template, data) {
+    const withBaseVariables = replaceBaseVariables(template, data);
+    return withBaseVariables.replace(/\[insert specific info\]/g, data.personalized || '');
+}
+
+function getContextBeforeInsert(bodyTemplateText, data) {
+    if (!bodyTemplateText) {
+        return '';
+    }
+
+    const [before] = bodyTemplateText.split('[insert specific info]');
+    if (!before) {
+        return '';
+    }
+
+    return replaceBaseVariables(before, data).trim();
+}
+
+function getContextAfterInsert(bodyTemplateText, data) {
+    if (!bodyTemplateText) {
+        return '';
+    }
+
+    const parts = bodyTemplateText.split('[insert specific info]');
+    if (parts.length < 2) {
+        return '';
+    }
+
+    const after = parts.slice(1).join('[insert specific info]');
+    return replaceBaseVariables(after, data).trim();
+}
+
+async function requestPersonalizedParagraph(prompt, apiKey) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            signal: controller.signal,
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4.1',
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'Fitting in with the tone and content of the rest of the email body template, fill in a useful context based on the company that we\'re emailing that will make our email look more specific to that particular company. It can be a recent development in the company or a particular feature about that company that pairs well with what we\'re offering. Make it fit in with the rest of the email so that it doesn’t sound like generic ChatGPT structured fill while also fitting in with the rest of the professional vibe of the email. Don’t write more than 1 sentence. Keep it direct and honest and how an undergraduate would sound while also maintaining professionalism. That means avoiding words like “inspiring” or “groundbreaking” that would make it seem obviously not written by a competent student.'
+                    },
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ],
+                temperature: 0.7,
+                max_tokens: 200
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            const message = data?.error?.message || response.statusText || 'Unknown error';
+            throw new Error(message);
+        }
+
+        const content = data?.choices?.[0]?.message?.content?.trim();
+        if (!content) {
+            throw new Error('Received empty response from OpenAI.');
+        }
+
+        return enforceSingleSentence(content);
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            throw new Error('Request to OpenAI timed out.');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function enforceSingleSentence(text) {
+    const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) {
+        return '';
+    }
+
+    const sentences = cleaned.split(/(?<=[.!?])\s+/);
+    const first = sentences[0]?.trim();
+    if (first) {
+        return first.endsWith('.') || first.endsWith('!') || first.endsWith('?') ? first : `${first}.`;
+    }
+
+    return cleaned;
 }
 
 async function fillRecipients(email) {
@@ -178,7 +441,16 @@ async function fillRecipients(email) {
         throw new Error('No email address provided');
     }
 
-    console.log(`🔥 FILLING EMAIL FIELD: "${email}"`);
+    const recipients = email
+        .split(',')
+        .map(value => value.trim())
+        .filter(Boolean);
+
+    if (recipients.length === 0) {
+        throw new Error('No email address provided');
+    }
+
+    console.log(`🔥 FILLING EMAIL FIELD: "${recipients.join(', ')}"`);
 
     const composeWindow = getActiveComposeWindow();
     if (!composeWindow) {
@@ -235,22 +507,24 @@ async function fillRecipients(email) {
 
     editableElement.focus();
 
+    const recipientString = recipients.join(', ');
+
     if ('value' in editableElement) {
         editableElement.value = '';
         editableElement.dispatchEvent(new Event('input', { bubbles: true }));
-        editableElement.value = email;
+        editableElement.value = recipientString;
         editableElement.dispatchEvent(new Event('input', { bubbles: true }));
         editableElement.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (editableElement.getAttribute && editableElement.getAttribute('contenteditable') === 'true') {
         editableElement.innerHTML = '';
         editableElement.textContent = '';
         editableElement.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'deleteContentBackward' }));
-        editableElement.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: email }));
+        editableElement.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: recipientString }));
         document.execCommand('selectAll', false, null);
-        document.execCommand('insertText', false, email);
+        document.execCommand('insertText', false, recipientString);
     } else {
         document.execCommand('selectAll', false, null);
-        document.execCommand('insertText', false, email);
+        document.execCommand('insertText', false, recipientString);
     }
 
     // As a final fallback, type via keyboard events if the field is still empty
@@ -258,7 +532,7 @@ async function fillRecipients(email) {
     const currentValue = editableElement.value || editableElement.textContent || '';
     if (!currentValue.trim()) {
         console.log('⚠️ Email field still empty, typing via keyboard events');
-        await typeWithKeyboard(editableElement, email);
+        await typeWithKeyboard(editableElement, recipientString);
     }
 
     await sleep(50);
@@ -273,9 +547,9 @@ async function fillRecipients(email) {
 
     await sleep(150);
 
-    const addedChips = composeWindow.querySelectorAll(`div[role="listitem"][data-hovercard-id*="${email}"]`);
-    if (!addedChips || addedChips.length === 0) {
-        console.warn('⚠️ Email chip not detected after insertion');
+    const addedChips = composeWindow.querySelectorAll('div[role="listitem"][data-hovercard-id]');
+    if (!addedChips || addedChips.length < recipients.length) {
+        console.warn('⚠️ Email chip count does not match recipients after insertion');
     }
 
     console.log('✅ EMAIL FIELD FILLED');

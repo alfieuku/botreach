@@ -1,6 +1,8 @@
 // Global variables
 let csvData = [];
 let currentTab = null;
+let isFillMode = false;
+let cachedEmailData = [];
 
 // DOM elements
 const csvFileInput = document.getElementById('csvFile');
@@ -77,7 +79,7 @@ async function checkOngoingSession() {
 
             showStatus(`Continuing draft session: ${currentRow}/${totalRows} (${remaining} remaining)`, 'info');
             createDraftsButton.textContent = 'Fill Next Draft';
-            createDraftsButton.onclick = fillNextDraft;
+            isFillMode = true;
         }
     } catch (error) {
         console.log('No ongoing session found');
@@ -87,8 +89,8 @@ async function checkOngoingSession() {
 // File input change handler
 csvFileInput.addEventListener('change', handleFileSelect);
 
-// Create drafts button handler
-createDraftsButton.addEventListener('click', createDrafts);
+// Primary action button handler
+createDraftsButton.addEventListener('click', handlePrimaryButtonClick);
 
 // Template change handlers
 subjectTemplate.addEventListener('input', saveTemplates);
@@ -254,7 +256,15 @@ async function restoreSavedCsv() {
     }
 }
 
-async function createDrafts() {
+async function handlePrimaryButtonClick() {
+    if (isFillMode) {
+        await fillNextDraft();
+    } else {
+        await startDraftSession();
+    }
+}
+
+async function startDraftSession() {
     if (csvData.length === 0) {
         showStatus('No CSV data loaded', 'error');
         return;
@@ -278,11 +288,11 @@ async function createDrafts() {
 
     if (needsPersonalization) {
         if (!openaiKey) {
-            showStatus('Please add your OpenAI API key to use the [personalized] placeholder.', 'error');
+            showStatus('Please add your OpenAI API key to use the [insert specific info] placeholder.', 'error');
             return;
         }
         if (!personalizationPrompt) {
-            showStatus('Please provide a personalization prompt to use the [personalized] placeholder.', 'error');
+            showStatus('Please provide a personalization prompt to use the [insert specific info] placeholder.', 'error');
             return;
         }
     }
@@ -293,31 +303,14 @@ async function createDrafts() {
     });
 
     // Prepare data for content script
-    const emailData = csvData.map(row => ({
+    cachedEmailData = csvData.map((row, index) => ({
         name: row.name || '',
         email: row.email || '',
         company: row.company || '',
-        personalized: ''
+        personalized: '',
+        rowIndex: index
     }));
 
-    if (needsPersonalization) {
-        try {
-            showStatus('Generating personalized paragraphs...', 'info');
-            await personalizeEmails(emailData, personalizationPrompt, openaiKey, subjectTemplate.value, bodyTemplate.value);
-            showStatus('Personalization complete. Creating drafts...', 'info');
-        } catch (error) {
-            console.error('Personalization failed:', error);
-            showStatus('Personalization failed: ' + error.message, 'error');
-            return;
-        }
-    }
-
-    emailData.forEach(email => {
-        email.subject = replaceTemplateVariables(subject, email);
-        email.body = replaceTemplateVariables(body, email);
-        delete email.personalized;
-    });
-    
     try {
         // Ensure content script is injected
         await ensureContentScriptInjected(currentTab.id);
@@ -325,7 +318,7 @@ async function createDrafts() {
         // Send data to content script for simple fill mode
         const response = await sendMessageWithTimeout(currentTab.id, {
             action: 'createDrafts',
-            data: emailData,
+            data: cachedEmailData,
             csvData: csvData,
             templates: {
                 subject: subjectTemplate.value,
@@ -333,7 +326,10 @@ async function createDrafts() {
             },
             openaiSettings: {
                 key: openaiKey,
-                prompt: personalizationPrompt
+                prompt: personalizationPrompt,
+                needsPersonalization,
+                subjectTemplate: subjectTemplate.value,
+                bodyTemplate: bodyTemplate.value
             }
         }, 10000);
 
@@ -341,29 +337,53 @@ async function createDrafts() {
             showStatus(response.message, 'success');
             // Change button text to indicate next step
             createDraftsButton.textContent = 'Fill Next Draft';
-            createDraftsButton.onclick = fillNextDraft;
+            isFillMode = true;
         } else {
             showStatus('Error: ' + (response?.error || 'Unknown error'), 'error');
         }
     } catch (error) {
-        showStatus('Failed to communicate with Gmail: ' + error.message, 'error');
+            showStatus('Failed to communicate with Gmail: ' + error.message, 'error');
     }
 }
 
 async function fillNextDraft() {
     try {
+        if (!currentTab || !currentTab.id) {
+            showStatus('Unable to access current tab. Please reopen the popup on Gmail.', 'error');
+            return;
+        }
+
         const response = await sendMessageWithTimeout(currentTab.id, {
             action: 'fillNext'
         }, 5000);
-        
+
         if (response && response.success) {
-            showStatus(response.message, 'success');
+            if (typeof response.filledIndex === 'number') {
+                const filled = cachedEmailData.find(item => item.rowIndex === response.filledIndex);
+                if (filled) {
+                    showStatus(`Filled draft for ${filled.email || filled.name || 'row ' + (response.filledIndex + 1)}.`, 'success');
+                } else {
+                    showStatus(response.message, 'success');
+                }
+            } else {
+                showStatus(response.message, 'success');
+            }
+
+            if (response.completed) {
+                markSessionComplete();
+            }
         } else {
-            showStatus('Error filling draft: ' + (response?.error || 'Unknown error'), 'error');
+            showStatus('Error filling draft: ' + (response?.error || response?.message || 'Unknown error'), 'error');
         }
     } catch (error) {
         showStatus('Failed to fill draft: ' + error.message, 'error');
     }
+}
+
+function markSessionComplete() {
+    isFillMode = false;
+    createDraftsButton.textContent = 'Create Drafts';
+    showStatus('All drafts completed!', 'success');
 }
 
 async function ensureContentScriptInjected(tabId, force = false) {
