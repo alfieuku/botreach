@@ -18,6 +18,7 @@ const bodyTemplate = document.getElementById('bodyTemplate');
 const openaiKeyInput = document.getElementById('openaiKey');
 const personalizationPromptInput = document.getElementById('personalizationPrompt');
 const createDraftsButton = document.getElementById('createDrafts');
+const refreshButton = document.getElementById('refreshButton');
 const status = document.getElementById('status');
 
 // Initialize popup
@@ -92,6 +93,9 @@ csvFileInput.addEventListener('change', handleFileSelect);
 // Primary action button handler
 createDraftsButton.addEventListener('click', handlePrimaryButtonClick);
 
+// Refresh handler
+refreshButton.addEventListener('click', handleRefreshClick);
+
 // Template change handlers
 subjectTemplate.addEventListener('input', saveTemplates);
 bodyTemplate.addEventListener('input', saveTemplates);
@@ -135,6 +139,7 @@ async function handleFileSelect(event) {
             // Show preview
             showPreview();
             createDraftsButton.disabled = false;
+            refreshButton.disabled = false;
             showStatus(`Loaded ${csvData.length} records`, 'success');
             // Persist CSV immediately
             try {
@@ -202,6 +207,8 @@ function showPreview() {
     // Clear previous preview
     previewHeader.innerHTML = '';
     previewBody.innerHTML = '';
+
+    refreshButton.disabled = false;
     
     // Create header
     const headers = Object.keys(csvData[0]);
@@ -246,6 +253,7 @@ async function restoreSavedCsv() {
             csvData = result.csvData;
             showPreview();
             createDraftsButton.disabled = false;
+            refreshButton.disabled = false;
             fileInfo.style.display = 'block';
             fileName.textContent = 'File: (restored from memory)';
             fileSize.textContent = `Rows: ${csvData.length}`;
@@ -261,6 +269,60 @@ async function handlePrimaryButtonClick() {
         await fillNextDraft();
     } else {
         await startDraftSession();
+    }
+}
+
+async function handleRefreshClick() {
+    const previousLabel = refreshButton.textContent;
+    refreshButton.disabled = true;
+    refreshButton.textContent = 'Refreshing...';
+
+    try {
+        await resetDraftSessionState();
+        showStatus('Session refreshed. Ready to start from the first row.', 'success');
+    } catch (error) {
+        console.error('Failed to refresh session:', error);
+        showStatus('Failed to refresh session: ' + error.message, 'error');
+    } finally {
+        refreshButton.textContent = previousLabel;
+        refreshButton.disabled = csvData.length === 0;
+    }
+}
+
+async function resetDraftSessionState() {
+    isFillMode = false;
+    cachedEmailData = [];
+    createDraftsButton.textContent = 'Create Drafts';
+
+    // Persist latest templates and settings
+    saveTemplates();
+    saveOpenAISettings();
+
+    try {
+        await chrome.storage.local.remove(['emailData', 'currentRowIndex', 'personalizedCache']);
+    } catch (error) {
+        console.warn('Failed to clear stored session data:', error);
+    }
+
+    if (csvData.length > 0) {
+        try {
+            await chrome.storage.local.set({ csvData });
+        } catch (error) {
+            console.warn('Failed to persist CSV data during refresh:', error);
+        }
+        showPreview();
+    } else {
+        previewSection.style.display = 'none';
+        createDraftsButton.disabled = true;
+    }
+
+    if (currentTab?.id && currentTab?.url?.includes('mail.google.com')) {
+        try {
+            await ensureContentScriptInjected(currentTab.id);
+            await sendMessageWithTimeout(currentTab.id, { action: 'resetSession' }, 3000);
+        } catch (error) {
+            console.warn('Unable to notify content script about refresh:', error);
+        }
     }
 }
 

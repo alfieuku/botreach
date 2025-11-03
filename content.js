@@ -43,6 +43,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         return true;
     }
+
+    if (request.action === 'resetSession') {
+        resetDraftProgress()
+            .then(() => {
+                sendResponse({ success: true });
+            })
+            .catch((error) => {
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
+    }
     
     if (request.action === 'getStatus') {
         const status = getCurrentStatus();
@@ -74,6 +85,7 @@ async function loadSavedData() {
         
         window.openaiSettings = result.openaiSettings || null;
         window.personalizedCache = result.personalizedCache || {};
+        window.csvData = result.csvData || null;
 
         // Return CSV data and templates for popup to use
         return {
@@ -99,6 +111,7 @@ async function saveDataToStorage(emailData, index, csvData = null, templates = n
         if (csvData) {
             dataToSave.csvData = csvData;
             console.log(`🔥 SAVING CSV: ${csvData.length} rows`);
+            window.csvData = csvData;
         }
         if (templates) {
             dataToSave.templates = templates;
@@ -146,6 +159,14 @@ async function completeDraftSession() {
     window.currentRowIndex = undefined;
 }
 
+async function resetDraftProgress() {
+    await completeDraftSession();
+    window.personalizedCache = {};
+    window.openaiSettings = null;
+    await chrome.storage.local.remove(['personalizedCache']);
+    console.log('🔥 SESSION RESET: Draft progress cleared');
+}
+
 function getCurrentStatus() {
     if (!window.emailData || window.currentRowIndex === undefined) {
         return { hasData: false };
@@ -167,8 +188,24 @@ async function fillCurrentCompose() {
         return { completed: true };
     }
     
-    const currentEmail = window.emailData[window.currentRowIndex];
-    console.log(`🔥 FILLING ROW ${window.currentRowIndex + 1}/${window.emailData.length}: ${currentEmail.email}`);
+    const currentPosition = window.currentRowIndex;
+    const currentEmail = window.emailData[currentPosition];
+    const resolvedRowIndex = typeof currentEmail.rowIndex === 'number' ? currentEmail.rowIndex : currentPosition;
+
+    if (!currentEmail.email || !currentEmail.email.trim()) {
+        const fallbackRow = Array.isArray(window.csvData) ? window.csvData[resolvedRowIndex] : null;
+        const fallbackEmail = fallbackRow?.email || fallbackRow?.Email || fallbackRow?.EMAIL || '';
+        if (fallbackEmail && typeof fallbackEmail === 'string') {
+            currentEmail.email = fallbackEmail.trim();
+            console.log(`⚙️ Restored missing email for row ${resolvedRowIndex + 1} from CSV data.`);
+        }
+    }
+
+    if (!currentEmail.email || !currentEmail.email.trim()) {
+        throw new Error(`Missing email address for row ${resolvedRowIndex + 1}`);
+    }
+
+    console.log(`🔥 FILLING ROW ${resolvedRowIndex + 1}/${window.emailData.length}: ${currentEmail.email}`);
     
     try {
         await ensurePersonalization(currentEmail);
@@ -183,21 +220,21 @@ async function fillCurrentCompose() {
         fillBody(currentEmail.body);
         
         // Update the index and save to storage
-        const newIndex = window.currentRowIndex + 1;
-        await updateCurrentIndex(newIndex);
+        const nextIndex = resolvedRowIndex + 1;
+        await updateCurrentIndex(nextIndex);
         
-        const remaining = window.emailData.length - newIndex;
-        showNotification(`Filled draft ${newIndex}/${window.emailData.length}. ${remaining} remaining.`);
+        const remaining = window.emailData.length - nextIndex;
+        showNotification(`Filled draft ${nextIndex}/${window.emailData.length}. ${remaining} remaining.`);
         
-        console.log(`✅ FILLED: Row ${newIndex}/${window.emailData.length}`);
+        console.log(`✅ FILLED: Row ${nextIndex}/${window.emailData.length}`);
         
-        return { completed: false, remaining, filledIndex: emailData.rowIndex ?? window.currentRowIndex - 1 };
+        return { completed: false, remaining, filledIndex: resolvedRowIndex };
     } catch (error) {
         console.error('❌ FILL ERROR:', error);
         showNotification(`Error filling draft: ${error.message}`);
-        const shouldContinue = handleFillError(error, window.currentRowIndex);
+        const shouldContinue = handleFillError(error, resolvedRowIndex);
         if (shouldContinue) {
-            const newIndex = window.currentRowIndex + 1;
+            const newIndex = resolvedRowIndex + 1;
             await updateCurrentIndex(newIndex);
             if (newIndex >= window.emailData.length) {
                 await completeDraftSession();
@@ -212,15 +249,37 @@ async function fillCurrentCompose() {
 
 function handleFillError(error, index) {
     const message = (error?.message || '').toLowerCase();
-    if (message.includes('no email address') || message.includes('email field not found')) {
-        console.warn(`Skipping row ${index + 1} due to missing email.`);
-        return true;
+    if (message.includes('no email address') || message.includes('missing email address')) {
+        console.warn(`Row ${index + 1} is missing an email address.`);
+        return false;
+    }
+    if (message.includes('gmail compose window not ready') || message.includes('email field not found')) {
+        console.warn(`Compose window not ready for row ${index + 1}. Stopping to avoid skipping.`);
+        return false;
     }
     if (message.includes('compose window not found')) {
         console.warn(`Compose window not ready for row ${index + 1}.`);
         return false;
     }
     return false;
+}
+
+async function findRecipientFieldWithRetry(composeWindow, selectors, retries = 3, delayMs = 150) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        for (const selector of selectors) {
+            const field = composeWindow.querySelector(selector);
+            if (field) {
+                console.log(`🔥 FOUND EMAIL FIELD: ${selector}`);
+                return field;
+            }
+        }
+
+        if (attempt < retries) {
+            await sleep(delayMs * (attempt + 1));
+        }
+    }
+
+    return null;
 }
 
 async function ensurePersonalization(emailData) {
@@ -452,7 +511,14 @@ async function fillRecipients(email) {
 
     console.log(`🔥 FILLING EMAIL FIELD: "${recipients.join(', ')}"`);
 
-    const composeWindow = getActiveComposeWindow();
+    let composeWindow = getActiveComposeWindow();
+    if (!composeWindow) {
+        console.warn('Compose window not found, retrying...');
+        for (let attempt = 0; attempt < 3 && !composeWindow; attempt++) {
+            await sleep(150 * (attempt + 1));
+            composeWindow = getActiveComposeWindow();
+        }
+    }
     if (!composeWindow) {
         throw new Error('Compose window not found');
     }
@@ -470,17 +536,9 @@ async function fillRecipients(email) {
         '.oj div[contenteditable="true"]'
     ];
 
-    let recipientField = null;
-    for (const selector of recipientSelectors) {
-        recipientField = composeWindow.querySelector(selector);
-        if (recipientField) {
-            console.log(`🔥 FOUND EMAIL FIELD: ${selector}`);
-            break;
-        }
-    }
-
+    const recipientField = await findRecipientFieldWithRetry(composeWindow, recipientSelectors);
     if (!recipientField) {
-        throw new Error('Email field not found');
+        throw new Error('Gmail compose window not ready: email field not found');
     }
 
     let editableElement = recipientField;
