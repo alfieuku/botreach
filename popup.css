@@ -99,6 +99,17 @@ body {
     border-bottom: 1px solid #eee;
 }
 
+.attachment-section {
+    padding: 20px;
+    border-bottom: 1px solid #eee;
+}
+
+.attachment-section h3 {
+    margin-bottom: 15px;
+    color: #333;
+    font-size: 16px;
+}
+
 .preview-section h3 {
     margin-bottom: 15px;
     color: #333;
@@ -240,6 +251,22 @@ tr:hover {
     border-color: #ccc;
     color: #999;
     cursor: not-allowed;
+}
+
+.inline-button {
+    margin-top: 10px;
+    padding: 6px 12px;
+    border: 1px solid #d9534f;
+    background: white;
+    color: #d9534f;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.inline-button:hover {
+    background: #f8d7da;
 }
 
 .primary-button:hover:not(:disabled) {

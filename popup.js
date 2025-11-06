@@ -3,6 +3,7 @@ let csvData = [];
 let currentTab = null;
 let isFillMode = false;
 let cachedEmailData = [];
+let attachmentData = null;
 
 // DOM elements
 const csvFileInput = document.getElementById('csvFile');
@@ -19,6 +20,11 @@ const openaiKeyInput = document.getElementById('openaiKey');
 const personalizationPromptInput = document.getElementById('personalizationPrompt');
 const createDraftsButton = document.getElementById('createDrafts');
 const refreshButton = document.getElementById('refreshButton');
+const attachmentInput = document.getElementById('attachmentFile');
+const attachmentInfo = document.getElementById('attachmentInfo');
+const attachmentName = document.getElementById('attachmentName');
+const attachmentSize = document.getElementById('attachmentSize');
+const removeAttachmentButton = document.getElementById('removeAttachment');
 const status = document.getElementById('status');
 
 // Initialize popup
@@ -47,6 +53,7 @@ Best regards,
     // Load saved templates and CSV (if any)
     await loadSavedData();
     await restoreSavedCsv();
+    await restoreSavedAttachment();
     
     // Check if there's an ongoing draft session
     await checkOngoingSession();
@@ -55,7 +62,7 @@ Best regards,
 async function checkOngoingSession() {
     try {
         // Check storage directly - more reliable than content script communication
-        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates']);
+        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates', 'attachments']);
         
         if (result.emailData && result.currentRowIndex !== undefined) {
             const { currentRow, totalRows, remaining } = {
@@ -78,6 +85,11 @@ async function checkOngoingSession() {
                 console.log('Restored templates');
             }
 
+            if (Array.isArray(result.attachments) && result.attachments.length > 0 && !attachmentData) {
+                attachmentData = result.attachments[0];
+                displayAttachmentInfo(attachmentData);
+            }
+
             showStatus(`Continuing draft session: ${currentRow}/${totalRows} (${remaining} remaining)`, 'info');
             createDraftsButton.textContent = 'Fill Next Draft';
             isFillMode = true;
@@ -89,6 +101,10 @@ async function checkOngoingSession() {
 
 // File input change handler
 csvFileInput.addEventListener('change', handleFileSelect);
+
+// Attachment handler
+attachmentInput.addEventListener('change', handleAttachmentSelect);
+removeAttachmentButton.addEventListener('click', handleAttachmentRemoval);
 
 // Primary action button handler
 createDraftsButton.addEventListener('click', handlePrimaryButtonClick);
@@ -154,6 +170,121 @@ async function handleFileSelect(event) {
         }
     };
     reader.readAsText(file);
+}
+
+async function handleAttachmentSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+        if (!isSupportedAttachment(file)) {
+            showStatus('Unsupported attachment type. Please choose a PDF, JPG, or PNG file.', 'error');
+            attachmentInput.value = '';
+            return;
+        }
+
+        const maxSizeBytes = 20 * 1024 * 1024; // 20 MB
+        if (file.size > maxSizeBytes) {
+            showStatus('Attachment is too large. Please choose a file under 20 MB.', 'error');
+            attachmentInput.value = '';
+            return;
+        }
+
+        const base64Data = await readFileAsBase64(file);
+        attachmentData = {
+            name: file.name,
+            type: file.type || inferMimeType(file.name),
+            size: file.size,
+            data: base64Data
+        };
+
+        displayAttachmentInfo(attachmentData);
+        await chrome.storage.local.set({ attachments: [attachmentData] });
+        showStatus(`Attachment ready: ${file.name}`, 'success');
+    } catch (error) {
+        console.error('Failed to load attachment:', error);
+        showStatus('Failed to load attachment: ' + error.message, 'error');
+        clearAttachmentSelection();
+    }
+}
+
+function handleAttachmentRemoval() {
+    clearAttachmentSelection();
+    showStatus('Attachment removed.', 'info');
+}
+
+function isSupportedAttachment(file) {
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg'];
+    if (allowedTypes.includes(file.type)) {
+        return true;
+    }
+
+    const extension = (file.name.split('.').pop() || '').toLowerCase();
+    return ['pdf', 'png', 'jpg', 'jpeg'].includes(extension);
+}
+
+function inferMimeType(filename) {
+    const extension = (filename.split('.').pop() || '').toLowerCase();
+    switch (extension) {
+        case 'pdf':
+            return 'application/pdf';
+        case 'png':
+            return 'image/png';
+        case 'jpg':
+        case 'jpeg':
+            return 'image/jpeg';
+        default:
+            return 'application/octet-stream';
+    }
+}
+
+function displayAttachmentInfo(attachment) {
+    if (!attachment) {
+        attachmentInfo.style.display = 'none';
+        attachmentName.textContent = '';
+        attachmentSize.textContent = '';
+        return;
+    }
+
+    attachmentInfo.style.display = 'block';
+    attachmentName.textContent = `File: ${attachment.name}`;
+    attachmentSize.textContent = `Size: ${formatFileSize(attachment.size)}`;
+}
+
+function clearAttachmentSelection() {
+    attachmentData = null;
+    attachmentInput.value = '';
+    displayAttachmentInfo(null);
+    if (chrome?.storage?.local?.remove) {
+        Promise.resolve(chrome.storage.local.remove(['attachments'])).catch(error => {
+            console.warn('Failed to clear attachment storage:', error);
+        });
+    }
+}
+
+function formatFileSize(bytes) {
+    if (typeof bytes !== 'number' || bytes <= 0) return '0 KB';
+    const units = ['Bytes', 'KB', 'MB', 'GB'];
+    const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    const value = bytes / Math.pow(1024, exponent);
+    return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+}
+
+function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result;
+            if (typeof result !== 'string') {
+                reject(new Error('Unexpected attachment format'));
+                return;
+            }
+            const base64 = result.includes(',') ? result.split(',').pop() : result;
+            resolve(base64);
+        };
+        reader.onerror = () => reject(reader.error || new Error('Failed to read attachment'));
+        reader.readAsDataURL(file);
+    });
 }
 
 function parseCSV(csvText) {
@@ -264,6 +395,21 @@ async function restoreSavedCsv() {
     }
 }
 
+async function restoreSavedAttachment() {
+    try {
+        const result = await chrome.storage.local.get(['attachments']);
+        if (Array.isArray(result.attachments) && result.attachments.length > 0) {
+            const storedAttachment = result.attachments[0];
+            if (storedAttachment?.data && storedAttachment?.name) {
+                attachmentData = storedAttachment;
+                displayAttachmentInfo(attachmentData);
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to restore attachment:', error);
+    }
+}
+
 async function handlePrimaryButtonClick() {
     if (isFillMode) {
         await fillNextDraft();
@@ -302,6 +448,14 @@ async function resetDraftSessionState() {
         await chrome.storage.local.remove(['emailData', 'currentRowIndex', 'personalizedCache']);
     } catch (error) {
         console.warn('Failed to clear stored session data:', error);
+    }
+
+    if (attachmentData) {
+        try {
+            await chrome.storage.local.set({ attachments: [attachmentData] });
+        } catch (error) {
+            console.warn('Failed to persist attachment during refresh:', error);
+        }
     }
 
     if (csvData.length > 0) {
@@ -373,6 +527,8 @@ async function startDraftSession() {
         rowIndex: index
     }));
 
+    const attachmentsToSend = attachmentData ? [attachmentData] : [];
+
     try {
         // Ensure content script is injected
         await ensureContentScriptInjected(currentTab.id);
@@ -392,7 +548,8 @@ async function startDraftSession() {
                 needsPersonalization,
                 subjectTemplate: subjectTemplate.value,
                 bodyTemplate: bodyTemplate.value
-            }
+            },
+            attachments: attachmentsToSend
         }, 10000);
 
         if (response && response.success) {
@@ -649,7 +806,7 @@ function saveOpenAISettings() {
 
 async function loadSavedData() {
     try {
-        const result = await chrome.storage.local.get(['templates', 'openaiKey', 'personalizationPrompt']);
+        const result = await chrome.storage.local.get(['templates', 'openaiKey', 'personalizationPrompt', 'attachments']);
         if (result.templates) {
             subjectTemplate.value = result.templates.subject || subjectTemplate.value;
             bodyTemplate.value = result.templates.body || bodyTemplate.value;
@@ -662,6 +819,11 @@ async function loadSavedData() {
 
         if (result.personalizationPrompt) {
             personalizationPromptInput.value = result.personalizationPrompt;
+        }
+
+        if (Array.isArray(result.attachments) && result.attachments.length > 0) {
+            attachmentData = result.attachments[0];
+            displayAttachmentInfo(attachmentData);
         }
     } catch (error) {
         console.error('Failed to load saved templates:', error);

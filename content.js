@@ -22,7 +22,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     if (request.action === 'createDrafts') {
         // Store the data and reset index
-        saveDataToStorage(request.data, 0, request.csvData, request.templates, request.openaiSettings);
+        saveDataToStorage(request.data, 0, request.csvData, request.templates, request.openaiSettings, request.attachments || []);
         console.log(`🔥 SIMPLE FILL: Ready to fill ${request.data.length} drafts`);
         
         sendResponse({ success: true, message: `Ready to fill ${request.data.length} drafts. Click the button for each draft.` });
@@ -76,7 +76,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function loadSavedData() {
     try {
-        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates', 'openaiSettings', 'personalizedCache']);
+        const result = await chrome.storage.local.get(['emailData', 'currentRowIndex', 'csvData', 'templates', 'openaiSettings', 'personalizedCache', 'attachments']);
         if (result.emailData && result.currentRowIndex !== undefined) {
             window.emailData = result.emailData;
             window.currentRowIndex = result.currentRowIndex;
@@ -86,13 +86,15 @@ async function loadSavedData() {
         window.openaiSettings = result.openaiSettings || null;
         window.personalizedCache = result.personalizedCache || {};
         window.csvData = result.csvData || null;
+        window.attachments = Array.isArray(result.attachments) ? result.attachments : [];
 
         // Return CSV data and templates for popup to use
         return {
             csvData: result.csvData || null,
             templates: result.templates || null,
             hasSession: result.emailData && result.currentRowIndex !== undefined,
-            openaiSettings: window.openaiSettings || null
+            openaiSettings: window.openaiSettings || null,
+            attachments: window.attachments || []
         };
     } catch (error) {
         console.log('No saved data found');
@@ -100,7 +102,7 @@ async function loadSavedData() {
     }
 }
 
-async function saveDataToStorage(emailData, index, csvData = null, templates = null, openaiSettings = null) {
+async function saveDataToStorage(emailData, index, csvData = null, templates = null, openaiSettings = null, attachments = null) {
     try {
         const dataToSave = {
             emailData: emailData,
@@ -120,6 +122,11 @@ async function saveDataToStorage(emailData, index, csvData = null, templates = n
         if (openaiSettings) {
             dataToSave.openaiSettings = openaiSettings;
             console.log('🔥 SAVING OPENAI SETTINGS: Stored key & prompt metadata');
+        }
+        if (attachments) {
+            dataToSave.attachments = attachments;
+            console.log(`🔥 SAVING ATTACHMENTS: ${attachments.length} file(s)`);
+            window.attachments = attachments;
         }
         
         await chrome.storage.local.set(dataToSave);
@@ -219,6 +226,9 @@ async function fillCurrentCompose() {
         // Fill body
         fillBody(currentEmail.body);
         
+        // Attach files if configured
+        await attachFilesToCompose();
+        
         // Update the index and save to storage
         const nextIndex = resolvedRowIndex + 1;
         await updateCurrentIndex(nextIndex);
@@ -280,6 +290,88 @@ async function findRecipientFieldWithRetry(composeWindow, selectors, retries = 3
     }
 
     return null;
+}
+
+async function attachFilesToCompose() {
+    if (!Array.isArray(window.attachments) || window.attachments.length === 0) {
+        return;
+    }
+
+    const composeWindow = getActiveComposeWindow();
+    if (!composeWindow) {
+        throw new Error('Compose window not found for attachments');
+    }
+
+    // Remove existing attachments to avoid duplicates
+    const removeButtons = composeWindow.querySelectorAll('[aria-label^="Remove attachment"], [aria-label^="Remove file"], [aria-label="Remove"]');
+    removeButtons.forEach(button => {
+        try {
+            button.click();
+        } catch (error) {
+            console.warn('Failed to remove existing attachment:', error);
+        }
+    });
+    if (removeButtons.length > 0) {
+        await sleep(150);
+    }
+
+    let fileInput = composeWindow.querySelector('input[type="file"][name="Filedata"]');
+    if (!fileInput) {
+        fileInput = composeWindow.querySelector('input[type="file"]');
+    }
+
+    if (!fileInput) {
+        const attachCommand = composeWindow.querySelector('div[command="Files"] input[type="file"], div[command="Files"]');
+        if (attachCommand instanceof HTMLInputElement) {
+            fileInput = attachCommand;
+        } else if (attachCommand) {
+            attachCommand.click();
+            await sleep(200);
+            fileInput = composeWindow.querySelector('input[type="file"][name="Filedata"]') || composeWindow.querySelector('input[type="file"]');
+        }
+    }
+
+    if (!fileInput) {
+        throw new Error('Attachment input not found');
+    }
+
+    const dataTransfer = new DataTransfer();
+    for (const attachment of window.attachments) {
+        if (!attachment?.data || !attachment?.name) {
+            continue;
+        }
+
+        try {
+            const file = base64ToFile(attachment.data, attachment.name, attachment.type || 'application/octet-stream');
+            dataTransfer.items.add(file);
+        } catch (error) {
+            console.error('Attachment preparation failed:', error);
+            throw new Error(`Failed to prepare attachment: ${attachment?.name || 'unknown file'}`);
+        }
+    }
+
+    if (dataTransfer.items.length === 0) {
+        return;
+    }
+
+    fileInput.files = dataTransfer.files;
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(400);
+}
+
+function base64ToFile(base64String, filename, mimeType) {
+    try {
+        const sanitized = base64String.replace(/^data:[^;]+;base64,/, '');
+        const byteCharacters = atob(sanitized);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+            byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        return new File([byteArray], filename, { type: mimeType || 'application/octet-stream' });
+    } catch (error) {
+        throw new Error('Invalid attachment encoding');
+    }
 }
 
 async function ensurePersonalization(emailData) {

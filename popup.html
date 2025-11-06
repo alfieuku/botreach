@@ -37,6 +37,22 @@
                 <p id="fileSize"></p>
             </div>
         </div>
+
+        <div class="attachment-section">
+            <h3>Attachment (optional)</h3>
+            <div class="file-input-container">
+                <input type="file" id="attachmentFile" accept=".pdf,.png,.jpg,.jpeg" />
+                <label for="attachmentFile" class="file-input-label">
+                    <span class="file-input-text">Choose Attachment</span>
+                    <span class="file-input-icon">📎</span>
+                </label>
+            </div>
+            <div class="file-info" id="attachmentInfo" style="display: none;">
+                <p id="attachmentName"></p>
+                <p id="attachmentSize"></p>
+                <button id="removeAttachment" class="inline-button" type="button">Remove Attachment</button>
+            </div>
+        </div>
         
         <div class="preview-section" id="previewSection" style="display: none;">
             <h3>CSV Preview</h3>
