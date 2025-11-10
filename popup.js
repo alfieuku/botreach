@@ -450,13 +450,8 @@ async function resetDraftSessionState() {
         console.warn('Failed to clear stored session data:', error);
     }
 
-    if (attachmentData) {
-        try {
-            await chrome.storage.local.set({ attachments: [attachmentData] });
-        } catch (error) {
-            console.warn('Failed to persist attachment during refresh:', error);
-        }
-    }
+    // Clear attachment to avoid duplicate uploads when restarting a session
+    clearAttachmentSelection();
 
     if (csvData.length > 0) {
         try {

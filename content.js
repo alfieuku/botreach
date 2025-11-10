@@ -170,7 +170,8 @@ async function resetDraftProgress() {
     await completeDraftSession();
     window.personalizedCache = {};
     window.openaiSettings = null;
-    await chrome.storage.local.remove(['personalizedCache']);
+    window.attachments = [];
+    await chrome.storage.local.remove(['personalizedCache', 'attachments']);
     console.log('🔥 SESSION RESET: Draft progress cleared');
 }
 
@@ -302,18 +303,7 @@ async function attachFilesToCompose() {
         throw new Error('Compose window not found for attachments');
     }
 
-    // Remove existing attachments to avoid duplicates
-    const removeButtons = composeWindow.querySelectorAll('[aria-label^="Remove attachment"], [aria-label^="Remove file"], [aria-label="Remove"]');
-    removeButtons.forEach(button => {
-        try {
-            button.click();
-        } catch (error) {
-            console.warn('Failed to remove existing attachment:', error);
-        }
-    });
-    if (removeButtons.length > 0) {
-        await sleep(150);
-    }
+    await clearExistingAttachments(composeWindow);
 
     let fileInput = composeWindow.querySelector('input[type="file"][name="Filedata"]');
     if (!fileInput) {
@@ -357,6 +347,44 @@ async function attachFilesToCompose() {
     fileInput.files = dataTransfer.files;
     fileInput.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(400);
+}
+
+async function clearExistingAttachments(composeWindow) {
+    const removalSelectors = [
+        '[aria-label^="Remove attachment"]',
+        '[aria-label*="Remove attachment"]',
+        '[aria-label="Remove"]',
+        '[data-tooltip*="Remove attachment"]',
+        '[data-tooltip*="Remove file"]',
+        '[data-tooltip="Remove"]',
+        'button[aria-label*="Remove"]',
+        'span[aria-label*="Remove"]'
+    ];
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const buttons = removalSelectors.flatMap(selector => Array.from(composeWindow.querySelectorAll(selector)));
+        if (buttons.length === 0) {
+            const attachmentChips = composeWindow.querySelectorAll('[data-tooltip*="Download"], .aQA, .aQw, .aQG');
+            if (attachmentChips.length === 0) {
+                return;
+            }
+        }
+
+        buttons.forEach(button => {
+            try {
+                button.click();
+            } catch (error) {
+                console.warn('Failed to activate attachment removal:', error);
+            }
+        });
+
+        await sleep(200);
+    }
+
+    const remaining = composeWindow.querySelectorAll('[data-tooltip*="Download"], .aQA, .aQw, .aQG');
+    if (remaining.length > 0) {
+        console.warn('Attachments may still be present after attempted removal.');
+    }
 }
 
 function base64ToFile(base64String, filename, mimeType) {
